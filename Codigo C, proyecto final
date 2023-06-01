@@ -1,0 +1,332 @@
+/*
+ * File:   Prueba ADC 
+ * Author: Bryan Ortiz
+ *
+ * Created on May 28, 2023, 11:19 PM
+ */
+// CONFIG1
+#pragma config FOSC = INTRC_NOCLKOUT// Oscillator Selection bits (INTOSCIO oscillator: I/O function on RA6/OSC2/CLKOUT pin, I/O function on RA7/OSC1/CLKIN)
+#pragma config WDTE = OFF       // Watchdog Timer Enable bit (WDT disabled and can be enabled by SWDTEN bit of the WDTCON register)
+#pragma config PWRTE = OFF      // Power-up Timer Enable bit (PWRT disabled)
+#pragma config MCLRE = OFF      // RE3/MCLR pin function select bit (RE3/MCLR pin function is digital input, MCLR internally tied to VDD)
+#pragma config CP = OFF         // Code Protection bit (Program memory code protection is disabled)
+#pragma config CPD = OFF        // Data Code Protection bit (Data memory code protection is disabled)
+#pragma config BOREN = OFF      // Brown Out Reset Selection bits (BOR disabled)
+#pragma config IESO = OFF       // Internal External Switchover bit (Internal/External Switchover mode is disabled)
+#pragma config FCMEN = OFF      // Fail-Safe Clock Monitor Enabled bit (Fail-Safe Clock Monitor is disabled)
+#pragma config LVP = OFF        // Low Voltage Programming Enable bit (RB3 pin has digital I/O, HV on MCLR must be used for programming)
+
+// CONFIG2
+#pragma config BOR4V = BOR40V   // Brown-out Reset Selection bit (Brown-out Reset set to 4.0V)
+#pragma config WRT = OFF        // Flash Program Memory Self Write Enable bits (Write protection off)
+
+// #pragma config statements should precede project file includes.
+// Use project enums instead of #define for ON and OFF.
+
+#include <xc.h>
+#include <pic16f887.h>
+#define _tmr0_value 236
+#define _XTAL_FREQ 8000000 //La frecencia que yo utlize para el delay
+#define periodoServo 470
+#define dirEEPROM_S1 0x04
+#define dirEEPROM_S2 0x05
+#define dirEEPROM_S3 0x06
+#define dirEEPROM_S4 0x07
+#define dirEEPROM_S5 0x08
+
+//Variables
+unsigned int tmr0count = 0; //cuenta interrupciones del TMR0
+long variadorPWM = 100000;
+unsigned int S1_periodo = 53;        //El periodo del servo puede ser de 10 a 53
+unsigned int S2_periodo = 10;
+unsigned int S3_periodo = 10;
+unsigned int S4_periodo = 53;
+unsigned int S5_periodo = 53;
+unsigned int S1_posicion;        //La posicion la da el ADC
+unsigned int S2_posicion;        //pero la tengo que MAPEAR
+unsigned int S3_posicion;        //Para que se convierta en periodo
+unsigned int S4_posicion;
+int S5;
+int modo;
+
+uint8_t botonPrevState;         //variable de antirrebote en EEPROM
+uint8_t botonPrevState1;         //variable de antirrebote en EEPROM
+
+//------------------------------------
+
+//Prototipo de funciones
+void setup(void); //crear la funcion, no le entrarn parametros
+void setup_ADC(void);
+void configBotones(void);
+unsigned int map(unsigned int value, unsigned int fromLow, unsigned int fromHigh, unsigned int toLow, int toHigh);
+void writeToEEPROM(uint8_t data, uint8_t address);             //GUARDA
+uint8_t readFromEEPROM(uint8_t address);                       //LEE
+void manual(void);
+void showlecture(void);
+void savelecture(void);
+//
+
+//Interrupcion TMR0 
+//que es una rutina de interrupcion que no recibe paramentro (isr))
+void __interrupt() isr (void){
+    if(T0IF)
+    {
+        tmr0count++; //INCREMETAR PUERTO
+        if (tmr0count == S1_periodo){
+            PORTCbits.RC0 = 0;
+        }
+        if (tmr0count == S2_periodo){
+            PORTCbits.RC1 = 0;
+        }
+        if (tmr0count == S3_periodo){
+            PORTCbits.RC3 = 0;
+        }
+        if (tmr0count == S4_periodo){
+            PORTCbits.RC4 = 0;
+        }
+        if (tmr0count == periodoServo){
+            PORTCbits.RC0 = 1;
+            PORTCbits.RC1 = 1;
+            PORTCbits.RC3 = 1;
+            PORTCbits.RC4 = 1;
+            
+            tmr0count = 0;
+        }
+        
+        TMR0 = _tmr0_value; // se le vuelve a cargar el valor al tmr0
+        T0IF = 0; //se apaga la bandera
+    }
+    
+    if(INTCONbits.RBIF){            //Interrupcion ONCHANGE PORTB
+        PORTB = PORTB;
+        INTCONbits.RBIF = 0;
+    }
+ }
+
+void main(void) {
+    setup();
+    setup_ADC();
+    configBotones();
+    //modo = 1;
+    manual();
+    while(1) //like nuestro loop 
+    {
+        
+        if(RB0 == 0){
+            modo=1;
+        }else if(RB1 == 0){
+            botonPrevState = 1;
+            if(RB0 == 1 && botonPrevState == 1){
+                botonPrevState = 0;
+            }
+            modo = 2;
+        }
+        else if(RB2 == 0){
+            botonPrevState = 1;
+            if(RB2 == 1 && botonPrevState1 == 1){    //Si deje de presionar el boton pero Estado anterior fue 1             
+                botonPrevState1 = 0;
+        }  
+            modo=3;
+        }
+        
+        switch (modo){
+            case 1:
+                manual();
+                break;
+            case 2:
+                savelecture();
+                break;
+            case 3:
+                showlecture();
+                break;
+        }
+        
+    }
+    return;
+}
+
+void setup(void) //La funcion 
+{
+    //CONFIGURACION PINES DIGITALES
+    ANSEL = 0;
+    ANSELH = 0;
+    //CONFIGURACION I/O
+    TRISC = 0; //PARA COLOCAR EL PUERTO C COMO SALIDA 
+    PORTC = 0;
+    
+    //CONF TMR0
+    OPTION_REGbits.T0CS = 0;  //bit 5 clock souce select bit FOSC/4
+    OPTION_REGbits.PSA =  0;  //bit 6 prescaler is to TMR0 
+    OPTION_REGbits.PS =  0b000; //prescaler 1:2
+    TMR0 = _tmr0_value ; //valor de tmr0 va a ser 236
+    
+    //Configuracion de interrupcion del TMr0 el iocb
+    INTCONbits.T0IF = 0; //BANDERA DE INTERRUPCION 
+    INTCONbits.T0IE = 1;  // periferico
+    INTCONbits.PEIE = 1;
+    INTCONbits.GIE = 1;  //global
+    
+    //CONF OSCILADOR INTERNO 
+    OSCCONbits.IRCF = 0b111;  //8MH
+    OSCCONbits.SCS  = 1;       //Elegir el oscilador interno
+    
+    // CONF PWM
+    TRISCbits.TRISC2 = 1;   // Habilitar salida del servomotor RC2 ES EL CCP1 entrada
+    PR2 = 250;              // Periodo del tmr2 (4ms)
+    CCP1CONbits.P1M = 0;    // mode single output (P1A modulated; P1B, P1C, P1D assigned as port pins)
+    CCP1CONbits.CCP1M = 0b00001100;    // Modo PWM
+    CCPR1L = 0x0f;          // Duty cycle inicial
+    CCP1CONbits.DC1B1 = 0;  // bits menos significativos
+    CCP1CONbits.DC1B0 = 0;  // bits menos singificativos 
+    //CONF TMR21
+    PIR1bits.TMR2IF = 0;    
+    T2CONbits.T2CKPS = 0b11;    // Prescaler 1:16
+    T2CONbits.TMR2ON = 1;   // Prender TMR2
+    while (!PIR1bits.TMR2IF); // esperar un ciclo, se niega el resultado de la interrupción
+    PIR1bits.TMR2IF = 0;
+    TRISCbits.TRISC2 = 0;   // Habilitar salida del servomotor en el CCP1
+    
+    return;
+}
+
+void setup_ADC(void){
+    PORTAbits.RA0=0;
+    TRISAbits.TRISA0=1;
+    ANSELbits.ANS0=1;       //USAR ANSEL 0 EN ra0
+    
+    PORTAbits.RA1=0;
+    TRISAbits.TRISA1=1;
+    ANSELbits.ANS1=1;       //USAR ANSEL 0 EN ra1
+    
+    PORTAbits.RA2=0;
+    TRISAbits.TRISA2=1;
+    ANSELbits.ANS2=1;       //USAR ANSEL 0 EN ra2
+    
+    PORTAbits.RA3=0;
+    TRISAbits.TRISA3=1;
+    ANSELbits.ANS3=1;       //USAR ANSEL 0 EN ra3
+    
+    PORTAbits.RA4=0;
+    TRISAbits.TRISA4=1;
+    ANSELbits.ANS4=1;       //USAR ANSEL 0 EN ra2
+    
+    
+    ADCON0bits.ADCS1=0;
+    ADCON0bits.ADCS0=1;     //fosc/8
+    
+    ADCON1bits.VCFG1=0;     //VSS
+    ADCON1bits.VCFG0=0;     //VDD
+    
+    ADCON1bits.ADFM=0;      //JUSTIFICADO IZQUIERDA
+    ADCON0bits.ADON=1;      //habilitar convertidor ADC
+    
+    __delay_us(100);
+}
+
+void configBotones() {
+    OPTION_REGbits.nRBPU = 0;   // Activo pull ups generales
+    WPUBbits.WPUB0 = 1;         // Activo pull up B0
+    WPUBbits.WPUB1 = 1;         // Activo pull up B1
+    WPUBbits.WPUB2 = 1;         // Activo pull up B2
+
+    INTCONbits.RBIE = 1;        // Activo interrupción de botón
+    INTCONbits.RBIF = 0;        // Apago bandera de interrupción
+    IOCBbits.IOCB0 = 1;         // INTERRUPCIÓN PORTB activada
+}
+
+unsigned int map(unsigned int value, unsigned int fromLow, unsigned int fromHigh, unsigned int toLow, int toHigh) {
+  return (value - fromLow) * (toHigh - toLow) / (fromHigh - fromLow) + toLow;
+}
+
+void writeToEEPROM(uint8_t data, uint8_t address){
+    EEADR = address;
+    EEDAT = data;
+    
+    EECON1bits.EEPGD = 0;       //Escribir a la memoria
+    EECON1bits.WREN = 1;        //Habilito escritura en EEPROM WRITE ENABLE     AQUI LE DIGO, TE DOY PERMISO DE ESCRIBIR
+    
+    INTCONbits.GIE = 0;         //DESHABILITO INTERRUPCIONES TEMPORALMENTE
+    
+    EECON2 = 0x55;      //Siempre es 55, es confirmacion de escritura
+    EECON2 = 0xAA;      
+    EECON1bits.WR = 1;          //AQUI LE DIGO ESCRIBI YA
+    
+    INTCONbits.GIE = 1;         //VUELVO A HABILITAR INTERRUPCIONES 
+    EECON1bits.WREN = 0;        //Deshabilito escritur en EEPROM
+}
+
+uint8_t readFromEEPROM(uint8_t address){
+    EEADR = address;
+    EECON1bits.EEPGD = 0;       //Le digo que accese a la data 
+    EECON1bits.RD = 1;          //lE DIGO LEE AHORA
+    return EEDAT;               //Poner valor en el dato y regresarlo
+}
+
+void manual(){
+    ADCON0bits.CHS = 0b0000;
+    __delay_ms(5);  
+    ADCON0bits.GO = 1;
+    while(ADCON0bits.GO == 1);  //No hacer nada mientras hace la conversion]
+    ADIF = 0;                   //Apagar bandera del ADC
+    S1_posicion = ((ADRESH << 2) + (ADRESL >> 6));   //JUNTAR 10 BITS
+    S1_periodo = map(S1_posicion, 0, 1023, 10, 45);
+
+    ADCON0bits.CHS = 0b0001;
+    __delay_ms(5);  
+    ADCON0bits.GO = 1;
+    while(ADCON0bits.GO == 1);  //No hacer nada mientras hace la conversion]
+    ADIF = 0;                   //Apagar bandera del ADC
+    S2_posicion = ((ADRESH << 2) + (ADRESL >> 6));   //JUNTAR 10 BITS
+    S2_periodo = map(S2_posicion, 0, 1023, 10, 45);
+    //__delay_ms(5); 
+
+    ADCON0bits.CHS = 0b0010;
+    __delay_ms(5);  
+    ADCON0bits.GO = 1;
+    while(ADCON0bits.GO == 1);  //No hacer nada mientras hace la conversion]
+    ADIF = 0;                   //Apagar bandera del ADC
+    S3_posicion = ((ADRESH << 2) + (ADRESL >> 6));   //JUNTAR 10 BITS
+    S3_periodo = map(S3_posicion, 0, 1023, 10, 45);
+    __delay_ms(5); 
+
+    ADCON0bits.CHS = 0b0011;
+    __delay_ms(5);  
+    ADCON0bits.GO = 1;
+    while(ADCON0bits.GO == 1);  //No hacer nada mientras hace la conversion]
+    ADIF = 0;                   //Apagar bandera del ADC
+    S4_posicion = ((ADRESH << 2) + (ADRESL >> 6));   //JUNTAR 10 BITS
+    S4_periodo = map(S4_posicion, 0, 1023, 10, 45);
+    __delay_ms(5); 
+
+    ADCON0bits.CHS = 0b0100;  // PWM del CCP del PIC
+    __delay_ms(5);  
+    ADCON0bits.GO = 1; // Iniciar la conversión
+    while(ADCON0bits.GO); // Esperar a que termine la conversión
+    ADIF = 0;   
+    int S5_posicion = ADRESH;  //JUNTAR 10 BITS
+    S5 = map(S5_posicion, 0, 255, 100, 255);
+    CCPR1L = S5;
+    __delay_ms(5); 
+    
+    
+
+         
+}
+
+void showlecture(){
+    S2_periodo = readFromEEPROM(dirEEPROM_S2);      // Leo EEPROM en esa dirección y asigno a S2_periodo
+    S1_periodo = readFromEEPROM(dirEEPROM_S1);      // Leo EEPROM en esa dirección y asigno a S1_periodo
+    S3_periodo = readFromEEPROM(dirEEPROM_S3);      // Leo EEPROM en esa dirección y asigno a S3_periodo
+    S4_periodo = readFromEEPROM(dirEEPROM_S4);      // Leo EEPROM en esa dirección y asigno a S4_periodo
+    CCPR1L = readFromEEPROM(dirEEPROM_S5);      // Leo EEPROM en esa dirección y asigno a S5_periodo
+    //CCPR1L = S5;
+}
+
+void savelecture(){      
+            writeToEEPROM(S1_periodo, dirEEPROM_S1); //Puedo hacer el resto del codigo
+            writeToEEPROM(S2_periodo, dirEEPROM_S2);
+            writeToEEPROM(S3_periodo, dirEEPROM_S3);
+            writeToEEPROM(S4_periodo, dirEEPROM_S4);
+            writeToEEPROM(S5, dirEEPROM_S5);   
+            
+}
